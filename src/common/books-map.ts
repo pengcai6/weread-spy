@@ -1,6 +1,6 @@
-import { outputJSON, pathExists, readJSON } from 'fs-extra'
+import fse from 'fs-extra'
 import path from 'path'
-import { BOOKS_DIR } from './index'
+import { BOOKS_DIR } from './index.js'
 
 // v1: json = { [id]: {title,id,url} }
 // v2: json = [ {id, title, url} ]
@@ -15,21 +15,21 @@ export type BookItem = {
 export let currentBooks: BookItem[] = []
 
 let loaded = false
-async function load() {
+export async function loadBooks() {
   if (loaded) return
 
   let list: BookItem[] = []
-  if (await pathExists(BOOKS_MAP_FILE)) list = await readJSON(BOOKS_MAP_FILE)
+  if (await fse.pathExists(BOOKS_MAP_FILE)) list = await fse.readJSON(BOOKS_MAP_FILE)
 
   currentBooks = list
   loaded = true
 }
-async function save() {
-  return outputJSON(BOOKS_MAP_FILE, currentBooks, { spaces: 2 })
+export async function saveBooks() {
+  return fse.outputJSON(BOOKS_MAP_FILE, currentBooks, { spaces: 2 })
 }
 
 export async function addBook(item: BookItem) {
-  await load()
+  await loadBooks()
   const list = currentBooks.slice()
 
   // remove
@@ -45,11 +45,23 @@ export async function addBook(item: BookItem) {
 
   list.push(item)
   currentBooks = list
-  save()
+  saveBooks()
 }
 
 export async function queryBook(query: Partial<BookItem>) {
-  await load()
+  await loadBooks()
   const item = currentBooks.find((item) => Object.keys(query).every((k) => item[k] === query[k]))
   return item
+}
+
+export async function queryBookAny(query: string) {
+  let _query: Partial<BookItem> = {}
+  if (/^\d+$/.test(query)) {
+    _query = { id: query }
+  } else if (/^https?:\/\//.test(query)) {
+    _query = { url: query }
+  } else {
+    _query = { title: query }
+  }
+  return queryBook(_query)
 }

@@ -7,13 +7,13 @@ import filenamify from 'filenamify'
 import fse from 'fs-extra'
 import path from 'path'
 import * as pptr from 'puppeteer'
-import { baseDebug, BOOKS_DIR } from '../common'
-import { addBook } from '../common/books-map'
-import { getBrowser } from '../utils/pptr'
+import { addBook, queryBook } from '../common/books-map.js'
+import { BOOKS_DIR, baseDebug } from '../common/index.js'
+import { getBrowser } from '../utils/pptr.js'
 
 const debug = baseDebug.extend('download')
 
-export default class DownloadCommand extends Command {
+export class DownloadCommand extends Command {
   static usage = Command.Usage({
     description: `下载 epub`,
   })
@@ -30,7 +30,21 @@ export default class DownloadCommand extends Command {
   })
 
   async execute() {
-    const { url, interval } = this
+    let { url, interval } = this
+
+    if (/^\w+$/.test(url) && !url.includes('/')) {
+      // id
+      if (/^\d+$/.test(url)) {
+        url = (await queryBook({ id: url }))?.url || ''
+        if (!url) {
+          console.error('url not found for id = %s', url)
+          process.exit(1)
+        }
+      } else {
+        url = `https://weread.qq.com/web/bookDetail/${url}`
+      }
+    }
+
     main(url, { interval })
   }
 }
@@ -48,50 +62,16 @@ export async function main(
 
   await page.goto(bookReadUrl)
 
-  const waitCondition = async (test: (el: Element, ...args: any[]) => boolean, ...args: any[]) => {
-    let ok = false
-    while (!ok) {
-      ok = await page.$eval('#app', test, ...args)
-      if (!ok) {
-        await new Promise((r) => {
-          setTimeout(r, 100)
-        })
-      }
-    }
-  }
+  /**
+   * Engine start
+   */
 
-  await waitCondition((el) => {
-    const state = (el as any).__vue__.$store.state
-    return state?.reader?.chapterContentState === 'DONE'
-  })
-
-  const state = await page.$eval('#app', (el) => {
-    const state = (el as any).__vue__.$store.state
-    return state
-  })
-
-  // want
-  const startInfo = {
-    bookId: state.reader.bookId,
-    bookInfo: state.reader.bookInfo,
-    chapterInfos: state.reader.chapterInfos,
-    chapterContentHtml: state.reader.chapterContentHtml,
-    chapterContentStyles: state.reader.chapterContentStyles,
-    currentChapterId: state.reader.currentChapter.chapterUid,
-  }
+  await waitReaderReady(page)
+  await subscribeToVuexMutaion(page)
 
   // save map
+  const startInfo = await getInfoFromPage(page)
   await addBook({ id: startInfo.bookId, title: startInfo.bookInfo.title, url: bookReadUrl })
-
-  const changeChapter = async (uid: number) => {
-    await page.$eval(
-      '#routerView',
-      (el, uid) => {
-        ;(el as any).__vue__.changeChapter({ chapterUid: uid })
-      },
-      uid
-    )
-  }
 
   let usingInterval: number | undefined = undefined
   if (options.interval) {
@@ -109,6 +89,9 @@ export async function main(
     debug('切换章节间隔 %s ms', usingInterval)
   }
 
+  // 先切到 index = 1, 后面会切到 index = 0, 触发 mutation
+  await changeChapter(page, startInfo.chapterInfos[1].chapterUid)
+
   const infos: any[] = []
   for (const [index, c] of startInfo.chapterInfos.entries()) {
     const { chapterUid } = c
@@ -117,32 +100,11 @@ export async function main(
     if (index > 0 && usingInterval) {
       await delay(usingInterval)
     }
-    await changeChapter(chapterUid)
+    await changeChapter(page, chapterUid)
 
-    await waitCondition((el, id) => {
-      const state = (el as any).__vue__.$store.state
-      const currentChapterId = state.reader.currentChapter.chapterUid
-      const currentState = state?.reader?.chapterContentState
-      console.log({ currentChapterId, currentState, id })
-      return currentChapterId === id && currentState === 'DONE'
-    }, chapterUid)
-    debug('已收集章节 id=%s', chapterUid)
-
-    const state = await page.$eval('#app', (el) => {
-      const state = (el as any).__vue__.$store.state
-      return state
-    })
-
-    const info = {
-      bookId: state.reader.bookId,
-      bookInfo: state.reader.bookInfo,
-      chapterInfos: state.reader.chapterInfos,
-      chapterContentHtml: state.reader.chapterContentHtml,
-      chapterContentStyles: state.reader.chapterContentStyles,
-      currentChapterId: state.reader.currentChapter.chapterUid,
-    }
-
+    const info = await getInfoFromPage(page)
     infos.push(info)
+    debug('已收集章节 id=%s', chapterUid)
   }
 
   // 书籍信息
@@ -164,4 +126,73 @@ export async function main(
   debug('downloaded to %s', bookJsonFile)
 
   await browser.close()
+}
+
+/**
+ * pptr Actions
+ */
+
+export async function waitReaderReady(page: pptr.Page) {
+  return page.waitForFunction(
+    () => {
+      const state = globalThis.app?.__vue__?.$store?.state
+      return state?.reader?.chapterContentState === 'DONE'
+    },
+    { polling: 100 }
+  )
+}
+
+export async function subscribeToVuexMutaion(page: pptr.Page) {
+  await page.evaluate(() => {
+    const $store = globalThis.app.__vue__.$store
+    $store.subscribe((mutation, state) => {
+      console.log('VUEX mutation type=%s', mutation.type, mutation.payload)
+      if (mutation.type === 'updateReaderContentHtml') {
+        globalThis.__chapterContentHtmlArray__ = mutation.payload
+      }
+    })
+  })
+}
+
+export async function changeChapter(page: pptr.Page, uid: number) {
+  // start
+  await page.$eval(
+    '#routerView',
+    (el, uid) => {
+      ;(el as any).__vue__.changeChapter({ chapterUid: uid })
+    },
+    uid
+  )
+
+  // wait complete
+  await waitReaderReady(page)
+  await page.waitForFunction(
+    (id) => {
+      const state = globalThis.app.__vue__.$store.state
+      const currentChapterId = state?.reader?.currentChapter?.chapterUid
+      const currentState = state?.reader?.chapterContentState
+      console.log({ currentChapterId, currentState, id })
+      return currentChapterId === id && currentState === 'DONE'
+    },
+    { polling: 100 },
+    uid
+  )
+}
+
+export async function getInfoFromPage(page: pptr.Page) {
+  const { state, chapterContentHtmlArray } = await page.evaluate(() => {
+    const state = globalThis.app.__vue__.$store.state
+    const chapterContentHtmlArray = globalThis.__chapterContentHtmlArray__
+    return { state, chapterContentHtmlArray }
+  })
+  // want
+  const info = {
+    bookId: state.reader.bookId,
+    bookInfo: state.reader.bookInfo,
+    chapterInfos: state.reader.chapterInfos,
+    chapterContentHtmlArray: chapterContentHtmlArray, // state.reader.chapterContentHtml,
+    chapterContentStyles: state.reader.chapterContentStyles,
+    currentChapterId: state.reader.currentChapter.chapterUid,
+  }
+  return info
 }

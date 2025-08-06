@@ -1,15 +1,16 @@
 /* eslint-disable @typescript-eslint/no-var-requires */
 
+import { $esm, Info, getBookHtml } from '$common'
+import type { AnyNode as $AnyNode, Element as $Element, Cheerio, CheerioAPI } from 'cheerio'
 import { load as $load } from 'cheerio'
-import type { Element as $Element, AnyNode as $AnyNode, CheerioAPI, Cheerio } from 'cheerio'
+import debugFactory from 'debug'
+import * as _ from 'lodash-es'
 import njk from 'nunjucks'
 import prettier from 'prettier'
-import _ from 'lodash'
-import debugFactory from 'debug'
-import { Info } from '../../common'
-import { ImgSrcInfo } from '../epub-img'
+import { ImgSrcInfo } from '../epub-img.js'
 
 const debug = debugFactory('weread-spy:utils:processContent')
+const { require } = $esm(import.meta)
 const prettierConfig = require('@magicdawn/prettier-config') as prettier.Options
 
 type TransformImgSrc = (src: string) => string
@@ -20,22 +21,23 @@ interface ProcessContentOptions {
 
 const DATA_ATTR_WHITELIST = ['data-src', 'data-bg-img']
 
-export default function processContent(info: Info, options: ProcessContentOptions) {
+export default async function processContent(info: Info, options: ProcessContentOptions) {
   const { chapterContentHtml, chapterContentStyles, currentChapterId } = info
   const { cssFilenames, imgSrcInfo } = options
   debug('processContent for title=%s chapterUid=%s', info.bookInfo.title, currentChapterId)
 
-  // 2021-08-29 出现 chapterContentHtml 为 string[]
-  let html = chapterContentHtml
-  if (Array.isArray(html)) {
-    html = html.join('')
-  }
+  let html = getBookHtml(info)
 
   // apply templates
   html = applyTemplate({ style: chapterContentStyles, content: html, cssFilenames })
 
   // new $
-  const $ = $load(html, { decodeEntities: false, xmlMode: true, lowerCaseTags: true })
+  const $ = $load(html, {
+    // @ts-ignore
+    _useHtmlParser2: true,
+    decodeEntities: false,
+    lowerCaseTags: true,
+  })
   // debug('cheerio loaded')
 
   // remove all data-xxx
@@ -44,9 +46,17 @@ export default function processContent(info: Info, options: ProcessContentOption
   // debug($.xml().trim())
 
   // combine span
-  traverse($.root()[0], $, removeUnusedSpan)
+  traverse($.root()[0], $, combineTextSpan)
   // debug('removeUnusedSpan complete')
   // debug($.xml().trim())
+
+  /**
+   * special cases
+   */
+
+  // <p class="fDropContent"><span class="ftext"><span>在</span></span><span>我的第一本书《练习的心态》中
+  // 显示效果差
+  $('.fDropContent > .ftext').removeClass('ftext').data('removed-class', 'ftext')
 
   // 图片
   const transformImgSrc = (src: string) => imgSrcInfo[src]?.localFile
@@ -65,7 +75,7 @@ export default function processContent(info: Info, options: ProcessContentOption
     // html = prettier.format(html, {...prettierConfig, parser: 'html'})
   } catch (e) {
     console.warn('[prettier] format met error: currentChapterId = %s', currentChapterId)
-    console.error(e.stack || e)
+    console.warn(e.stack || e)
   }
 
   // replace
@@ -73,7 +83,7 @@ export default function processContent(info: Info, options: ProcessContentOption
 
   let style = chapterContentStyles
   try {
-    style = prettier.format(style, { ...prettierConfig, parser: 'css' })
+    style = await prettier.format(style, { ...prettierConfig, parser: 'css' })
   } catch (e) {
     console.warn('[prettier] format met error: currentChapterId = %s', currentChapterId)
     console.error(e.stack || e)
@@ -146,14 +156,12 @@ type OnNodeResult = { traverseChildren?: boolean } | undefined | void
 type OnNode = (el: $AnyNode, $: CheerioAPI, extraData?: any) => OnNodeResult
 
 function traverse(el: $AnyNode, $: CheerioAPI, onNode: OnNode, extraData?: any) {
-  const $el = $(el)
-
   // self
   const { traverseChildren = true } = onNode(el, $, extraData) || {}
 
   // children
-  if (['tag', 'root'].includes(el.type) && traverseChildren) {
-    ;(el as $Element).childNodes?.forEach((c) => {
+  if (traverseChildren && (el.type === 'tag' || el.type === 'root')) {
+    el.childNodes.forEach((c) => {
       if (c.type === 'text') return
       traverse(c, $, onNode, extraData)
     })
@@ -173,7 +181,7 @@ function removeDataAttr(el: $Element, $: CheerioAPI): OnNodeResult {
   }
 }
 
-function removeUnusedSpan(el: $Element, $: CheerioAPI): OnNodeResult {
+function combineTextSpan(el: $Element, $: CheerioAPI): OnNodeResult {
   if (el.type !== 'tag') return
   if (!el.childNodes?.length) {
     return
@@ -181,11 +189,15 @@ function removeUnusedSpan(el: $Element, $: CheerioAPI): OnNodeResult {
 
   const isSimpleTextSpan = (c: $AnyNode) =>
     c.type === 'tag' &&
-    (c as $Element).tagName?.toLowerCase() === 'span' &&
+    c.tagName?.toLowerCase() === 'span' &&
     Object.keys((c as $Element).attribs || {}).length === 0
 
-  const shouldCombine = el.childNodes.every(isSimpleTextSpan)
+  if (isSimpleTextSpan(el)) {
+    return { traverseChildren: false }
+  }
+
   const $el = $(el)
+  const shouldCombine = el.childNodes.every(isSimpleTextSpan)
   if (shouldCombine) {
     const text = $el.text()
     $el.empty()
@@ -221,7 +233,8 @@ function removeUnusedSpan(el: $Element, $: CheerioAPI): OnNodeResult {
         $el.append(cur$)
       }
     }
-    return { traverseChildren: false }
+
+    return { traverseChildren: true }
   }
 
   return { traverseChildren: true }
@@ -231,17 +244,27 @@ function removeUnusedSpan(el: $Element, $: CheerioAPI): OnNodeResult {
  * 收集 img src
  */
 
-function collectImgSrc(el: $Element, $: CheerioAPI, ctx: any): OnNodeResult {
-  if (el.type === 'tag' && el.tagName?.toLowerCase?.() === 'img') {
-    const src = ($(el).data('src') as string | undefined) || $(el).attr('src')
+const CLASS_FOOTNOTE = 'qqreader-footnote'
 
-    if (!src) {
-      // $(el)
-      debugger
+function collectImgSrc(el: $Element, $: CheerioAPI, ctx: string[]): OnNodeResult {
+  if (el.type === 'tag' && el.tagName?.toLowerCase?.() === 'img') {
+    const $el = $(el)
+
+    // 不处理这种脚注
+    // <img
+    //  data-wr-co=\"5445\"
+    //  alt=\"敲西瓜。日本的小孩在夏天常玩的游戏。小孩蒙着眼，手拿棍子，比赛谁先可以把西瓜敲碎。\"
+    //  class=\"qqreader-footnote\"
+    //  src =\"data:image/gif;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQImWNgYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==\"
+    //  data-src=\"../Images/note.png\"
+    // />
+    if ($el.hasClass(CLASS_FOOTNOTE)) {
+      return
     }
 
+    const src = ($el.data('src') as string | undefined) || $el.attr('src')
     if (src) {
-      ;(ctx as string[]).push(src)
+      ctx.push(src)
     }
   }
 
@@ -253,10 +276,11 @@ function collectImgSrc(el: $Element, $: CheerioAPI, ctx: any): OnNodeResult {
       const src = m[1]
       $(el).attr('data-bg-img', src) // mark, has no effect, the result html will be abondoned
 
-      if (!src) {
-        debugger
+      // TODO: 无法处理
+      // <div data-wr-bd=\"1\" data-wr-inset=\"1\" data-wr-co=\"344\" class=\"bgimg\" style=\"background-image:url(../Images/copyright.jpg)
+      if (src && !(src.startsWith('../') || src.startsWith('./'))) {
+        ctx.push(src)
       }
-      ;(ctx as string[]).push(src)
     }
   }
 }
@@ -266,12 +290,16 @@ function fixImgSrc(el: $Element, $: CheerioAPI, ctx: any): OnNodeResult {
 
   if (el.tagName?.toLowerCase?.() === 'img') {
     const $el = $(el)
-    const src = $el.data('src')
+
+    if ($el.hasClass(CLASS_FOOTNOTE)) {
+      return
+    }
 
     // remove alt
     $el.removeAttr('alt')
 
     // transform & change src
+    const src = $el.data('src')
     const newSrc = ctx.transformImgSrc(src)
     ctx.imgs.push({
       src,

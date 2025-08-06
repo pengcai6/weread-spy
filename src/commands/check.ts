@@ -1,13 +1,13 @@
 import { Command, Option } from 'clipanion'
-import globby from 'globby'
-import epubcheck from '../utils/epubcheck'
+import fg from 'fast-glob'
+import epubcheck from '../utils/epubcheck.js'
 
-export default class CheckCommand extends Command {
+export class CheckCommand extends Command {
   static usage = Command.Usage({
     description: `检查 epub 文件是否符合规范`,
   })
 
-  static paths = [['c'], ['check']]
+  static paths = [['check'], ['c']]
 
   files: string[] = Option.Rest({ required: 1 })
 
@@ -17,7 +17,7 @@ export default class CheckCommand extends Command {
     for (const f of files) {
       const pattern = f.includes('*')
       if (pattern) {
-        const subfiles = globby.sync(f)
+        const subfiles = fg.sync(f)
         subfiles.forEach((f) => epubcheck(f))
         continue
       }

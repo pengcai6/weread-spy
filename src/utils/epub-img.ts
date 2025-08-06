@@ -1,14 +1,15 @@
+import { getBookHtml } from '$common'
 import { createHash } from 'crypto'
-import path from 'path'
 import debugFactory from 'debug'
-import { getImgSrcs } from './processContent'
-import pmap from 'promise.map'
-import mime from 'mime'
-import dl from 'dl-vampire'
-import sharp from 'sharp'
+import { dl, is404Error } from 'dl-vampire'
 import fse from 'fs-extra'
-import Book from './Book'
+import mime from 'mime'
 import ms from 'ms'
+import path from 'path'
+import pmap from 'promise.map'
+import sharp from 'sharp'
+import Book from './Book.js'
+import { getImgSrcs } from './processContent/index.js'
 
 const debug = debugFactory('weread-spy:utils:epub-img')
 const md5 = (s: string) => createHash('md5').update(s, 'utf8').digest('hex')
@@ -45,11 +46,7 @@ export default async function getImgSrcInfo(book: Book, clean: boolean) {
   // imgSrcs
   let imgSrcs: string[] = []
   for (let i = 0; i < chapterInfos.length; i++) {
-    // 2021-08-29 出现 chapterContentHtml 为 string[]
-    let html = data.infos[i].chapterContentHtml
-    if (Array.isArray(html)) {
-      html = html.join('')
-    }
+    const html = getBookHtml(data.infos[i])
     const curSrcs = getImgSrcs(html)
     imgSrcs = imgSrcs.concat(curSrcs)
   }
@@ -132,8 +129,10 @@ export default async function getImgSrcInfo(book: Book, clean: boolean) {
           },
         })
       } catch (e) {
-        // 例如 https://res.weread.qq.com/wrepub/web/855825/copyright.jpg
-        if (e?.statusCode === 404) {
+        // @example
+        // https://res.weread.qq.com/wrepub/web/855825/copyright.jpg
+        // https://res.weread.qq.com/wrepub/CB_3300070708_83%28The_Earth_Through_Time%29.png
+        if (is404Error(e)) {
           delete imgSrcInfo[src] // 剔除了, 当他不存在
           return
         }

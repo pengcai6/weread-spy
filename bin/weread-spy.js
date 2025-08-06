@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 
 /* eslint-disable @typescript-eslint/no-var-requires */
-const isDev = require('fs').existsSync(__dirname + '/.dev')
+
+let isDev = require('fs').existsSync(__dirname + '/.dev')
+
+// force use dist
+// FIXME: comment this before publish
+// isDev = false
 
 if (isDev) {
   require('ts-node').register({
@@ -9,5 +14,5 @@ if (isDev) {
   })
   require('../src/bin')
 } else {
-  require('../lib/bin')
+  require('../dist/bin')
 }

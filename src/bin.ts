@@ -1,15 +1,26 @@
-import debugFactory from 'debug'
-import { Builtins, Cli } from 'clipanion'
+#!/usr/bin/env node
 
-import GenEpubCommand from './commands/gen'
-import LaunchCommand from './commands/launch'
-import CheckCommand from './commands/check'
-import DownloadCommand from './commands/download'
-import OneCommand from './commands/one'
+import { Builtins, Cli } from 'clipanion'
+import debugFactory from 'debug'
+import { CheckCommand } from './commands/check.js'
+import { DownloadCommand } from './commands/download.js'
+import { GenCommand } from './commands/gen.js'
+import { InfoCommand } from './commands/info.js'
+import { LaunchCommand } from './commands/launch.js'
+import { OneCommand } from './commands/one.js'
+import { $esm } from './common/index.js'
+
+const { require } = $esm(import.meta)
 
 // enable logs
 if (!process.env.DEBUG) {
-  debugFactory.enable('weread-spy:*')
+  const enabledNSP = [
+    `weread-spy:*`,
+    process.env.NODE_ENV !== 'production' && 'weread-spy-detail:*',
+  ]
+    .filter(Boolean)
+    .join(',')
+  debugFactory.enable(enabledNSP)
 }
 
 // @ts-ignore
@@ -27,11 +38,12 @@ cli.register(Builtins.HelpCommand)
 cli.register(Builtins.VersionCommand)
 
 // commands
+cli.register(OneCommand)
 cli.register(DownloadCommand)
-cli.register(GenEpubCommand)
+cli.register(GenCommand)
 cli.register(LaunchCommand)
 cli.register(CheckCommand)
-cli.register(OneCommand)
+cli.register(InfoCommand)
 
 cli.runExit(process.argv.slice(2), {
   ...Cli.defaultContext,

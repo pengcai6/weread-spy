@@ -1,34 +1,16 @@
 import { Command, Option } from 'clipanion'
 import inquirer from 'inquirer'
+import * as _ from 'lodash-es'
 import * as pptr from 'puppeteer'
 import URI from 'urijs'
-import { baseDebug } from '../common'
-import { getBrowser } from '../utils/pptr'
-import { main as download } from './download'
-import { main as gen } from './gen'
+import { baseDebug } from '../common/index.js'
+import { getBrowser } from '../utils/pptr.js'
+import { changeChapter, main as download, waitReaderReady } from './download.js'
+import { genCommandMain as gen } from './gen.js'
 
 const debug = baseDebug.extend('one')
 
-const EXAMPLE_SHELF_BOOK = {
-  bookId: '815123',
-  title: '曾国藩家书',
-  author: '曾国藩',
-  cover: 'https://wfqqreader-1252317822.image.myqcloud.com/cover/123/815123/s_815123.jpg',
-  secret: 1,
-  format: 'epub',
-  soldout: 0,
-  payType: 4097,
-  finished: 1,
-  finishReading: 0,
-  lastChapterIdx: 12,
-  readUpdateTime: 1602417448,
-  updateTime: 1583779409,
-  progress: 0,
-  updated: 0,
-}
-type ShelfBook = typeof EXAMPLE_SHELF_BOOK
-
-export default class extends Command {
+export class OneCommand extends Command {
   static usage = Command.Usage({
     description: '一站式操作, 启动浏览器, 浏览阅读网页, 回到控制台输入 y 开始生成',
   })
@@ -46,13 +28,13 @@ export default class extends Command {
   async execute() {
     const { browser, page } = await getBrowser()
 
-    // 使用 browser goto book readUrl
     let prompt: any
 
     const handler = async (e: pptr.Frame) => {
       const pageUrl = e.url()
       const uri = URI(pageUrl)
       const path = uri.pathname()
+      // if (path.startsWith('/web/bookDetail/')) {
       if (path.startsWith('/web/reader/')) {
         // https://github.com/SBoudrias/Inquirer.js/issues/491#issuecomment-277595658
         // clean prev
@@ -61,16 +43,18 @@ export default class extends Command {
           console.log('')
         }
 
-        console.log('当前浏览链接像是一本书')
-        console.log(pageUrl)
         const title = await page.title()
+        console.log('')
+        console.log('当前浏览链接像是一本书:')
+        console.log('   [url]: %s', pageUrl)
+        console.log(' [title]: %s', title)
 
         // prompt
         prompt = inquirer.prompt([
           {
             type: 'confirm',
             name: 'confirm',
-            message: `书名: ${title}, 是否下载: `,
+            message: `是否下载: `,
           },
         ])
 
@@ -79,14 +63,19 @@ export default class extends Command {
         if (!confirm) return
 
         // 移除 listener
-        page.off('framenavigated', handler)
+        page.off('framenavigated', handlerDebounced)
 
         // 确认下载
         decideDownload(page, browser, this.dir, this.interval)
       }
     }
 
-    page.on('framenavigated', handler)
+    const handlerDebounced = _.debounce(handler, 1000)
+    page.on('framenavigated', handlerDebounced)
+
+    // FIXME: only for dev-test
+    // await page.goto('https://weread.qq.com/web/reader/e1932d70813ab82e7g014f5b')
+    // await page.goto('https://weread.qq.com/web/reader/f1132f80813ab821eg018540')
   }
 }
 
@@ -96,76 +85,21 @@ async function decideDownload(
   dir?: string,
   interval?: string
 ) {
-  const waitCondition = async (test: (el: Element, ...args: any[]) => boolean, ...args: any[]) => {
-    let ok = false
-    while (!ok) {
-      ok = await page.$eval('#app', test, ...args)
-      if (!ok) {
-        await new Promise((r) => {
-          setTimeout(r, 100)
-        })
-      }
-    }
-  }
+  await waitReaderReady(page)
 
-  await waitCondition((el) => {
-    const state = (el as any).__vue__.$store.state
-    if (state?.reader?.chapterContentState === 'DONE') {
-      return true
-    } else {
-      return false
-    }
+  const state = await page.evaluate(() => {
+    return globalThis.app.__vue__.$store.state
   })
-
-  const state = await page.$eval('#app', (el) => {
-    const state = (el as any).__vue__.$store.state
-    return state
-  })
-
-  // want
-  const startInfo = {
-    bookId: state.reader.bookId,
-    bookInfo: state.reader.bookInfo,
-    chapterInfos: state.reader.chapterInfos,
-    chapterContentHtml: state.reader.chapterContentHtml,
-    chapterContentStyles: state.reader.chapterContentStyles,
-    currentChapterId: state.reader.currentChapter.chapterUid,
-  }
-
-  const changeChapter = async (uid: number) => {
-    await page.$eval(
-      '#routerView',
-      (el, uid) => {
-        ;(el as any).__vue__.changeChapter({ chapterUid: uid })
-      },
-      uid
-    )
-  }
 
   const chapterInfos = state.reader.chapterInfos
-
+  // why? 不记得了
+  // second + first
   const firstChapterUid = chapterInfos[0].chapterUid
   const secondChapterUid = chapterInfos[1].chapterUid
-
   // to second
-  await changeChapter(secondChapterUid)
-  await waitCondition((el, id) => {
-    const state = (el as any).__vue__.$store.state
-    const currentChapterId = state.reader.currentChapter.chapterUid
-    const currentState = state?.reader?.chapterContentState
-    console.log({ currentChapterId, currentState, id })
-    return currentChapterId === id && currentState === 'DONE'
-  }, secondChapterUid)
-
+  await changeChapter(page, secondChapterUid)
   // to first
-  await changeChapter(firstChapterUid)
-  await waitCondition((el, id) => {
-    const state = (el as any).__vue__.$store.state
-    const currentChapterId = state.reader.currentChapter.chapterUid
-    const currentState = state?.reader?.chapterContentState
-    console.log({ currentChapterId, currentState, id })
-    return currentChapterId === id && currentState === 'DONE'
-  }, firstChapterUid)
+  await changeChapter(page, firstChapterUid)
 
   const bookCoverUrl = page.url()
 
@@ -175,6 +109,7 @@ async function decideDownload(
 
   // generate
   const file = await gen({ url: bookCoverUrl, clean: true, dir })
+  console.log('')
   debug('-'.repeat(20), 'generate complete', '-'.repeat(20))
   debug('epub 文件: %s', file)
 }

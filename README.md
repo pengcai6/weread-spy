@@ -6,6 +6,9 @@
 [![npm downloads](https://img.shields.io/npm/dm/weread-spy.svg?style=flat-square)](https://www.npmjs.com/package/weread-spy)
 [![npm license](https://img.shields.io/npm/l/weread-spy.svg?style=flat-square)](http://magicdawn.mit-license.org)
 
+> [!CAUTION]
+> 项目未维护, 可能会 [导致封号](https://github.com/magicdawn/weread-spy/issues/44#issuecomment-1810076252)
+
 ## 声明
 
 本项目仅供技术研究使用, 请勿用于商业用途!<br/>
@@ -62,9 +65,9 @@ $ pnpm add weread-spy -g
 - `weread-spy gen -u <url>` 根据下载的信息, 生成电子书
 - `weread-spy check` 跑 epub check
 
-## Changelog
+## 更新日志
 
-[CHANGELOG.md](CHANGELOG.md)
+see CHANGELOG.md
 
 ## License
 
